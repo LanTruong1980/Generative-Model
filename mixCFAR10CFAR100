@@ -1,0 +1,302 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+# This is the newest version on cifar10
+from numpy import expand_dims
+from numpy import zeros
+from numpy import ones
+from numpy import vstack
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from tensorflow.keras import layers
+from numpy.random import randn
+from numpy.random import randint
+from keras.optimizers import Adam
+
+import glob
+import imageio
+import os
+import PIL
+import time
+
+from IPython import display
+
+
+# In[2]:
+
+
+(train_images_cfar10, train_labels_cfar10), (_, _) = tf.keras.datasets.cifar10.load_data()
+(train_images_cfar100, train_labels_cfar100), (_, _)  =tf.keras.datasets.cifar100.load_data()
+
+train_images_cfar10 = train_images_cfar10.reshape(train_images_cfar10.shape[0], 32, 32, 3).astype('float32')
+train_images_cfar100 = train_images_cfar100.reshape(train_images_cfar100.shape[0], 32, 32, 3).astype('float32')
+train_dataset_1= (train_images_cfar10 - 127.5) / 127.5  # Normalize the images to [-1, 1]
+train_dataset_2 = (train_images_cfar100 - 127.5) / 127.5  # Normalize the images to [-1, 1]
+
+
+# In[3]:
+
+
+train_images_cfar10.shape
+
+
+# In[3]:
+
+
+# define the standalone discriminator model
+def make_discriminator(opt,in_shape=(32,32,3)):
+    model = tf.keras.Sequential()
+    model.add(layers.Conv2D(64, (3,3), padding='same', input_shape=in_shape))
+    model.add(layers.LeakyReLU(alpha=0.2))
+    model.add(layers.Conv2D(128, (3,3), strides=(2,2), padding='same'))
+    model.add(layers.LeakyReLU(alpha=0.2))
+    model.add(layers.Conv2D(128, (3,3), strides=(2,2), padding='same'))
+    model.add(layers.LeakyReLU(alpha=0.2))
+    model.add(layers.Conv2D(256, (3,3), strides=(2,2), padding='same'))
+    model.add(layers.LeakyReLU(alpha=0.2))
+    model.add(layers.Flatten())
+    model.add(layers.Dropout(0.4))
+    model.add(layers.Dense(1, activation='sigmoid'))
+    # compile model
+    model.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
+    return model
+
+
+# In[7]:
+
+
+#define the standalone generator model
+def make_generator(opt,d_latent):
+    model = tf.keras.Sequential()
+    n_nodes = 256 * 4 * 4
+    model.add(layers.Dense(n_nodes, input_dim=d_latent))
+    model.add(layers.LeakyReLU(alpha=0.2))
+    model.add(layers.Reshape((4, 4, 256)))
+    model.add(layers.Conv2DTranspose(128, (4,4), strides=(2,2), padding='same'))
+    model.add(layers.LeakyReLU(alpha=0.2))
+    model.add(layers.Conv2DTranspose(128, (4,4), strides=(2,2), padding='same'))
+    model.add(layers.LeakyReLU(alpha=0.2))
+    model.add(layers.Conv2DTranspose(128, (4,4), strides=(2,2), padding='same'))
+    model.add(layers.LeakyReLU(alpha=0.2))
+    model.add(layers.Conv2D(3, (3,3), activation='tanh', padding='same'))
+    # compile model
+    model.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
+    return model
+
+
+# In[4]:
+
+
+# Define a combined model
+def GAN(generator, discriminator,opt):
+    discriminator.trainable = False
+    model = tf.keras.Sequential()
+    model.add(generator)
+    model.add(discriminator)
+    model.compile(loss='binary_crossentropy', optimizer=opt)
+    return model
+
+
+# In[5]:
+
+
+# Define optimizers
+generator_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=0.5)
+discriminator_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4,beta_1=0.5)
+
+
+# In[8]:
+
+
+discriminator = make_discriminator(discriminator_optimizer)
+generator = make_generator(generator_optimizer,100)
+gan_model = GAN(generator, discriminator,generator_optimizer)
+
+
+# In[9]:
+
+
+# select random dataset samples
+def generate_samples(dataset, n_samples):
+    ix = randint(0, dataset.shape[0], n_samples)
+    X = dataset[ix]
+    y = ones((n_samples, 1))
+    return X, y
+
+
+# In[10]:
+
+
+# generate points in latent space as input for the generator
+def generate_latent(d_latent, n_samples):
+    x_input = randn(d_latent * n_samples)
+    x_input = x_input.reshape(n_samples, d_latent)
+    return x_input
+
+
+# In[11]:
+
+
+# use the generator to generate n fake examples, with class labels
+def generate_fake(d_latent, n_samples):
+    x_input = generate_latent(d_latent, n_samples)
+    X = generator.predict(x_input)
+    y = zeros((n_samples, 1))
+    return X, y
+
+
+# In[12]:
+
+
+# Generate and save images
+def generate_and_save_images(epoch, test_input):
+  predictions = generator(test_input, training=False)
+
+  fig = plt.figure(figsize=(4, 4))
+
+  for i in range(predictions.shape[0]):
+      plt.subplot(4, 4, i+1)
+      plt.imshow(predictions[i, :, :, 0])
+      plt.axis('off')
+
+  plt.savefig('image_at_epoch_{:04d}.png'.format(epoch))
+  plt.show()
+
+
+# In[13]:
+
+
+seed=generate_latent(100, 16)
+d_latent=100
+
+
+# In[16]:
+
+
+# train the generator and discriminator
+def train(dataset_1,dataset_2, d_latent, seed, n_epochs=100, n_batch=128):
+    bat_per_epo = int(dataset_1.shape[0] / n_batch)
+    half_batch = int(n_batch / 2)
+    # manually enumerate epochs
+    for i in range(n_epochs):
+        start = time.time()
+        # enumerate batches over the training set
+        for j in range(bat_per_epo):
+            # get randomly selected 'real' samples (Dataset_1 and Dataset_2)
+            X_real_1, y_real_1 = generate_samples(dataset_1, half_batch)
+            X_real_2, y_real_2 = generate_samples(dataset_2, half_batch)
+            # Generate Bernoulli(gamma) random variable
+            gamma=0.5
+            B=np.random.binomial(1,gamma)
+            if B==1:
+              gnoise=tf.random.normal(X_real_1.shape)
+            else:
+              gnoise=tf.zeros(X_real_1.shape)  
+            X_real_1=X_real_1+gnoise
+            
+            B=np.random.binomial(1,gamma)
+            if B==1:
+              gnoise=tf.random.normal(X_real_2.shape)
+            else:
+              gnoise=tf.zeros(X_real_2.shape)  
+            X_real_2=X_real_2+gnoise
+            X_real=tf.concat([X_real_1, X_real_2],0)
+            y_real=tf.concat([y_real_1, y_real_2],0)
+            # generate 'fake' examples
+            X_fake, y_fake = generate_fake(d_latent, n_batch)
+            # update discriminator model weights
+            d_loss_1, _ = discriminator.train_on_batch(X_real, y_real)
+            d_loss_2, _ = discriminator.train_on_batch(X_fake, y_fake)        
+            
+            # generate latent
+            X_gan= generate_latent(d_latent, n_batch)
+            # create inverted labels for the fake samples
+            y_gan = ones((n_batch, 1))
+            # update the generator via the discriminator's error
+            g_loss = gan_model.train_on_batch(X_gan, y_gan)
+    
+        # Produce images for the GIF as you go
+        display.clear_output(wait=True)
+        generate_and_save_images(i+1,seed)
+                             
+
+        # Save the model every 10 epochs
+        if (i + 1) % 2 == 0:
+          checkpoint.save(file_prefix = checkpoint_prefix)
+          filename = 'model_mixcfar_%03d.h5' % (i+1)
+          generator.save(filename)  
+
+        print ('Time for epoch {} is {} sec'.format(i + 1, time.time()-start))
+        
+        
+    # Generate after the final epoch
+    display.clear_output(wait=True)
+    generate_and_save_images(n_epochs,seed)
+                           
+
+
+# In[15]:
+
+
+# Save checkpoints
+checkpoint_dir = './training_checkpoints'
+checkpoint_prefix = os.path.join(checkpoint_dir, "ckpt")
+checkpoint = tf.train.Checkpoint(generator_optimizer=generator_optimizer,
+                                 discriminator_optimizer=discriminator_optimizer,
+                                 generator=generator,
+                                 discriminator=discriminator)
+
+
+# In[17]:
+
+
+# size of the latent space
+dataset_1=train_dataset_1
+dataset_2=train_dataset_2
+
+
+# In[18]:
+
+
+# train model
+train(dataset_1,dataset_2, d_latent, seed)
+
+
+# In[19]:
+
+
+# generating new images
+from keras.models import load_model
+ 
+# plot the generated images
+def generate_plot(examples, n):
+    for i in range(n * n):
+        plt.subplot(n, n, 1 + i)
+        plt.axis('off')
+        plt.imshow(examples[i, :, :])
+        plt.show()
+
+# plot the generated images
+def create_plot(examples, n):
+    # plot images
+    for i in range(n * n):
+        # define subplot
+        plt.subplot(n, n, 1 + i)
+        # turn off axis
+        plt.axis('off')
+        # plot raw pixel data
+        plt.imshow(examples[i, :, :])
+    plt.show()        
+        
+# load model
+model = load_model('model_mixcfar_100.h5')
+# Generate images
+latent_space = generate_latent(100, 16)
+X = model.predict(latent_space)
+X = (X + 1) / 2.0
+create_plot(X, 4)
+
